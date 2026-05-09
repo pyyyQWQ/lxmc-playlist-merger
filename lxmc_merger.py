@@ -8,13 +8,19 @@ import json
 import os
 import sys
 import time
+import copy
+import logging
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 
-__version__ = "1.0.0"
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-PROJECT_URL = "https://github.com/pyyyQWQ/lxmc-playlist-merger"
+__version__ = "1.0.1"
+
+PROJECT_URL = "https://github.com/pyyyQWQ/Lx-Playlist-Merger"
 
 # Colors
 BG       = "#0f1117"
@@ -33,32 +39,50 @@ DISABLED_BG = "#2d333b"
 
 
 def load_lxmc(path: str):
+    """Load and parse .lxmc playlist file."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
-        try:
-            text = gzip.decompress(raw).decode("utf-8")
-        except Exception:
-            try:
-                text = raw.decode("utf-8")
-            except Exception:
-                return None
-        data = json.loads(text)
-        if not (data.get("data") and data["data"].get("list")):
-            return None
-        return data
-    except Exception:
+    except OSError as e:
+        logger.error(f"Failed to read file {path}: {e}")
         return None
+
+    try:
+        text = gzip.decompress(raw).decode("utf-8")
+    except gzip.BadGzipFile:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            logger.error(f"Failed to decode file {path}: {e}")
+            return None
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON from {path}: {e}")
+        return None
+
+    if not (data.get("data") and data["data"].get("list")):
+        logger.warning(f"Invalid playlist format in {path}")
+        return None
+
+    return data
 
 
 def save_lxmc(data: dict, path: str):
-    text = json.dumps(data, ensure_ascii=False)
-    compressed = gzip.compress(text.encode("utf-8"))
-    with open(path, "wb") as f:
-        f.write(compressed)
+    """Save playlist data to .lxmc file (gzip compressed)."""
+    try:
+        text = json.dumps(data, ensure_ascii=False)
+        compressed = gzip.compress(text.encode("utf-8"))
+        with open(path, "wb") as f:
+            f.write(compressed)
+    except (OSError, TypeError) as e:
+        logger.error(f"Failed to save file {path}: {e}")
+        raise
 
 
 def song_key(song: dict) -> str:
+    """Generate unique key for a song."""
     return f"{song.get('source', '')}_{song.get('id', '')}"
 
 
@@ -210,7 +234,7 @@ class App(tk.Tk):
         self.hint_lbl.pack(fill="both", expand=True)
 
         self.tree.bind("<Motion>", self._on_row_hover)
-        self.tree.bind("<Leave>",  self._on_row_leave)
+        # Removed empty _on_row_leave binding
 
     def _make_zone(self, parent, title, hint, idx):
         f = tk.Frame(parent, bg=CARD, bd=1, relief="solid",
@@ -279,8 +303,8 @@ class App(tk.Tk):
             sb = ttk.Style()
             sb.configure("Vertical.TScrollbar", background=BORDER,
                 troughcolor=CARD, arrowcolor=TEXT2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to apply dark theme: {e}")
 
     def _open_file(self, idx):
         path = filedialog.askopenfilename(
@@ -318,30 +342,35 @@ class App(tk.Tk):
         self._update_buttons()
 
     def _swap(self):
+        """Swap File 1 and File 2 data."""
         for attr in ("path", "data", "list"):
             k1, k2 = f"file1_{attr}", f"file2_{attr}"
-            setattr(self, k1, getattr(self, k2))
-            setattr(self, k2, getattr(self, k1))
+            v1, v2 = getattr(self, k1), getattr(self, k2)
+            setattr(self, k1, v2)
+            setattr(self, k2, v1)
 
+        self._refresh_zone_display()
+        self._update_buttons()
+
+    def _refresh_zone_display(self):
+        """Refresh the display of both zones."""
         for idx in (0, 1):
             zone = self.zone1 if idx == 0 else self.zone2
             data = self.file1_data if idx == 0 else self.file2_data
             path = self.file1_path  if idx == 0 else self.file2_path
-            if data:
-                lbl = self.zone1_name_lbl  if idx == 0 else self.zone2_name_lbl
-                clbl = self.zone1_count_lbl if idx == 0 else self.zone2_count_lbl
-                ztitle = zone.winfo_children()[0]
+
+            ztitle = zone.winfo_children()[0]
+            lbl = self.zone1_name_lbl  if idx == 0 else self.zone2_name_lbl
+            clbl = self.zone1_count_lbl if idx == 0 else self.zone2_count_lbl
+
+            if data and path:
                 lbl.config(text=Path(path).name)
                 clbl.config(text=f"  {len(data['data']['list'])} songs")
                 ztitle.config(fg=GREEN, text=f"File {'1' if idx == 0 else '2'} Loaded")
             else:
-                ztitle = zone.winfo_children()[0]
-                lbl = self.zone1_name_lbl  if idx == 0 else self.zone2_name_lbl
-                clbl = self.zone1_count_lbl if idx == 0 else self.zone2_count_lbl
                 ztitle.config(fg=TEXT2, text=f"File {'1' if idx == 0 else '2'}")
                 lbl.config(text="")
                 clbl.config(text="")
-        self._update_buttons()
 
     def _update_buttons(self):
         has_both = bool(self.file1_data and self.file2_data)
@@ -379,7 +408,8 @@ class App(tk.Tk):
 
             merged_list = common + only1 + only2
 
-            merged = json.loads(json.dumps(self.file2_data))
+            # Use copy.deepcopy instead of json.loads(json.dumps())
+            merged = copy.deepcopy(self.file2_data)
             merged["data"]["list"] = merged_list
             merged["data"]["locationUpdateTime"] = int(time.time() * 1000)
             self.merged_data = merged
@@ -401,7 +431,10 @@ class App(tk.Tk):
             self.hint_lbl.pack_forget()
             self.btn_download.config(state="normal", bg=GREEN, fg="white")
 
+            logger.info(f"Merge completed: {len(common)} common, {len(only1)} only in file1, {len(only2)} only in file2")
+
         except Exception as ex:
+            logger.error(f"Merge error: {ex}")
             self._show_err(f"Merge error: {ex}")
 
     def _render_table(self, limit=None):
@@ -430,11 +463,8 @@ class App(tk.Tk):
             row = self.tree.identify_row(event.y)
             if row:
                 self.tree.tk.call(self.tree, "tag", "add", row, "hover")
-        except Exception:
+        except tk.TclError:
             pass
-
-    def _on_row_leave(self, event):
-        pass
 
     def _download(self):
         if not self.merged_data:
@@ -453,8 +483,10 @@ class App(tk.Tk):
         try:
             save_lxmc(self.merged_data, path)
             messagebox.showinfo("Done", f"Saved to:\n{path}\n\nTotal: {len(self.merged_data['data']['list'])} songs")
+            logger.info(f"Saved merged playlist to {path}")
         except Exception as e:
             messagebox.showerror("Save Failed", str(e))
+            logger.error(f"Failed to save {path}: {e}")
 
     def _clear(self):
         self.file1_path = self.file2_path = None
